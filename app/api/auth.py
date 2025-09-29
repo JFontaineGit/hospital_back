@@ -9,9 +9,10 @@ from sqlmodel import select
 
 from datetime import datetime
 
+from app.config import debug
 from app.models import Doctors, User
 from app.db.main import SessionDep
-from app.core.auth import gen_token, JWTBearer, decode
+from app.core.auth import gen_token, JWTBearer, decode, generate_csrf_token, validate_csrf_token, decode_token
 from app.core.interfaces.oauth import OauthRepository
 from app.core.interfaces.users import UserRepository
 from app.core.interfaces.emails import EmailService
@@ -38,7 +39,7 @@ oauth_router = APIRouter(
 async def get_scopes(request: Request, _=Depends(auth)):
     scopes = request.state.scopes
     return ORJSONResponse({
-        "scopes":scopes,
+        "scopes": scopes,
     })
 
 @router.post("/decode/")
@@ -47,7 +48,7 @@ async def decode_hex(data: OauthCodeInput):
     return decode(bytes_code, dict)
 
 @router.post("/doc/login", response_model=TokenDoctorsResponse)
-async def doc_login(session: SessionDep, credentials: Annotated[DoctorAuth, Form(...)]):
+async def doc_login(session: SessionDep, credentials: Annotated[DoctorAuth, Form(...)]) -> ORJSONResponse:
     statement = select(Doctors).where(Doctors.email == credentials.email)
     result = session.exec(statement)
     doc: Doctors = result.first()
@@ -58,8 +59,8 @@ async def doc_login(session: SessionDep, credentials: Annotated[DoctorAuth, Form
         raise HTTPException(status_code=404, detail="Invalid credentials")
 
     doc_data = {
-        "sub":str(doc.id),
-        "scopes":["doc"]
+        "sub": str(doc.id),
+        "scopes": ["doc"]
     }
 
     if doc.is_active:
@@ -67,10 +68,11 @@ async def doc_login(session: SessionDep, credentials: Annotated[DoctorAuth, Form
 
     token = gen_token(doc_data)
     refresh_token = gen_token(doc_data, refresh=True)
-    
+    csrf_token = generate_csrf_token()
+
     doc.last_login = datetime.now()
 
-    return ORJSONResponse(
+    response = ORJSONResponse(
         TokenDoctorsResponse(
             access_token=token,
             token_type="Bearer",
@@ -94,8 +96,38 @@ async def doc_login(session: SessionDep, credentials: Annotated[DoctorAuth, Form
         ).model_dump()
     )
 
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=False,
+        secure=not debug, 
+        samesite="None",
+        max_age=15 * 60,
+        path="/"
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=not debug,
+        samesite="None",
+        max_age=24 * 60 * 60,
+        path="/"
+    )
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=not debug,
+        samesite="None",
+        max_age=24 * 60 * 60,
+        path="/"
+    )
+
+    return response
+
 @router.post("/login", response_model=TokenUserResponse)
-async def login(session: SessionDep, credentials: Annotated[UserAuth, Form(...)]):
+async def login(session: SessionDep, credentials: Annotated[UserAuth, Form(...)]) -> ORJSONResponse:
     console.print(credentials)
     statement = select(User).where(User.email == credentials.email)
     result = session.exec(statement)
@@ -108,8 +140,8 @@ async def login(session: SessionDep, credentials: Annotated[UserAuth, Form(...)]
         raise HTTPException(status_code=400, detail="Invalid credentials payload")
 
     user_data = {
-        "sub":str(user.id),
-        "scopes":[]
+        "sub": str(user.id),
+        "scopes": []
     }
 
     if user.is_admin:
@@ -125,6 +157,7 @@ async def login(session: SessionDep, credentials: Annotated[UserAuth, Form(...)]
 
     token = gen_token(user_data)
     refresh_token = gen_token(user_data, refresh=True)
+    csrf_token = generate_csrf_token()
 
     user.last_login = datetime.now()
 
@@ -132,13 +165,44 @@ async def login(session: SessionDep, credentials: Annotated[UserAuth, Form(...)]
     session.commit()
     session.refresh(user)
 
-    return ORJSONResponse(
+    response = ORJSONResponse(
         TokenUserResponse(
             access_token=token,
             token_type="Bearer",
             refresh_token=refresh_token,
         ).model_dump()
     )
+
+    # Cookies seguras
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=False,
+        secure=not debug,
+        samesite="None",
+        max_age=15 * 60,
+        path="/"
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=not debug,
+        samesite="None",
+        max_age=24 * 60 * 60,
+        path="/"
+    )
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=not debug,
+        samesite="None",
+        max_age=24 * 60 * 60,
+        path="/"
+    )
+
+    return response
 
 @oauth_router.get("/{service}/")
 async def oauth_login(service: str):
@@ -151,7 +215,7 @@ async def oauth_login(service: str):
     except Exception as e:
         console.print_exception(show_locals=True)
         raise HTTPException(status_code=500, detail=str(e))
-    
+
 @oauth_router.get("/webhook/google_callback")
 async def google_callback(request: Request):
     try:
@@ -171,27 +235,48 @@ async def google_callback(request: Request):
     except Exception as e:
         console.print_exception(show_locals=True)
         raise HTTPException(status_code=500, detail=str(e))
-    
 
 @router.get("/refresh", response_model=TokenUserResponse, name="refresh_token")
-async def refresh(request: Request, user: User = Depends(auth)):
+async def refresh(request: Request, user: User = Depends(auth)) -> ORJSONResponse:
+    validate_csrf_token(request)
+
+    refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            refresh_token = auth_header.split(" ")[1]
+        else:
+            raise HTTPException(status_code=401, detail="Missing refresh token")
+
+    try:
+        old_payload = decode_token(refresh_token)
+        if old_payload.get("type") != "refresh_token":
+            raise ValueError("Invalid refresh token")
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    user_id = old_payload["sub"]
+    old_jti = old_payload["jti"]
+    ban_set = storage.get(key=user_id, table_name="ban-token") or set()
+    if isinstance(ban_set, str): 
+        ban_set = {ban_set}
+    ban_set.add(old_jti)
+    storage.set(key=user_id, value=ban_set, table_name="ban-token")
 
     if isinstance(user, Doctors):
         doc_data = {
-            "sub":str(user.id),
-            "scopes":["doc"]
+            "sub": str(user.id),
+            "scopes": ["doc"]
         }
-
         if user.is_active:
             doc_data["scopes"].append("active")
 
+        new_token = gen_token(doc_data)
+        new_refresh_token = gen_token(doc_data, refresh=True)
 
-        token = gen_token(doc_data)
-        refresh_token = gen_token(doc_data)
-
-        return ORJSONResponse(
+        response = ORJSONResponse(
             TokenDoctorsResponse(
-                access_token=token,
+                access_token=new_token,
                 token_type="Bearer",
                 doc=DoctorResponse(
                     id=user.id,
@@ -208,57 +293,86 @@ async def refresh(request: Request, user: User = Depends(auth)):
                     last_login=user.last_login,
                     date_joined=user.date_joined,
                 ),
-                refresh_token=refresh_token
+                refresh_token=new_refresh_token
+            ).model_dump()
+        )
+    else:
+        user_data = {
+            "sub": str(user.id),
+            "scopes": []
+        }
+        if user.is_admin:
+            user_data["scopes"].append("admin")
+        if user.is_superuser:
+            user_data["scopes"].append("superuser")
+        else:
+            user_data["scopes"].append("user")
+        if user.is_active:
+            user_data["scopes"].append("active")
+        if "google" in request.state.scopes:
+            user_data["scopes"].append("google")
+
+        new_token = gen_token(user_data)
+        new_refresh_token = gen_token(user_data, refresh=True)
+
+        response = ORJSONResponse(
+            TokenUserResponse(
+                access_token=new_token,
+                token_type="bearer",
+                refresh_token=new_refresh_token,
             ).model_dump()
         )
 
-    user_data = {
-        "sub":str(user.id),
-        "scopes":[]
-    }
-
-    if user.is_admin:
-        user_data["scopes"].append("admin")
-
-    if user.is_superuser:
-        user_data["scopes"].append("superuser")
-    else:
-        user_data["scopes"].append("user")
-
-    if user.is_active:
-        user_data["scopes"].append("active")
-        
-    if "google" in request.state.scopes:
-        user_data["scopes"].append("google")
-
-    token = gen_token(user_data)
-    refresh_token = gen_token(user_data, refresh=True)
-
-    return ORJSONResponse(
-        TokenUserResponse(
-            access_token=token,
-            token_type="bearer",
-            refresh_token=refresh_token,
-        ).model_dump()
+    # Setea nuevas cookies
+    response.set_cookie(
+        key="access_token",
+        value=new_token,
+        httponly=False,
+        secure=not debug,
+        samesite="None",
+        max_age=15 * 60,
+        path="/"
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh_token,
+        httponly=True,
+        secure=not debug,
+        samesite="None",
+        max_age=24 * 60 * 60,
+        path="/"
     )
 
+    return response
+
 @router.delete("/logout")
-async def logout(request: Request, authorization: Optional[str] = Header(None), _=Depends(auth)):
-    if authorization is None or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No credentials provided or invalid format"
-        )
+async def logout(request: Request, authorization: Optional[str] = Header(None), _=Depends(auth)) -> ORJSONResponse:
+    validate_csrf_token(request)
 
     session_user = request.state.user
+    user_id = str(session_user.id)
 
-    token = authorization.split(" ")[1]
+    access_token = request.cookies.get("access_token") or (authorization.split(" ")[1] if authorization else None)
+    refresh_token = request.cookies.get("refresh_token")
 
-    table_name = "ban-token"
+    ban_set = storage.get(key=user_id, table_name="ban-token") or set()
+    if isinstance(ban_set, str): 
+        ban_set = {ban_set}
 
-    if not storage.get(key=str(session_user.id), table_name="ban-token") is None:
-        storage.update(key=str(session_user.id), value=token, table_name=table_name)
+    if access_token:
+        access_payload = decode_token(access_token)
+        ban_set.add(access_payload["jti"])
+    if refresh_token:
+        refresh_payload = decode_token(refresh_token)
+        ban_set.add(refresh_payload["jti"])
 
-    result = storage.set(key=str(session_user.id), value=token, table_name=table_name)
+    storage.set(key=user_id, value=ban_set, table_name="ban-token")
 
-    return result.model_dump()
+    response = ORJSONResponse({"msg": "logged out"})
+
+    # Borra cookies
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    response.delete_cookie("csrf_token", path="/")
+
+    return response

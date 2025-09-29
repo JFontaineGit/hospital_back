@@ -8,7 +8,6 @@ from scalar_fastapi import get_scalar_api_reference
 
 from contextlib import asynccontextmanager
 
-#from rich import print
 from rich.traceback import install
 from rich.console import Console
 from rich.panel import Panel
@@ -42,10 +41,7 @@ async def lifespan(app: FastAPI):
     storage.create_table("recovery-codes")
     console.rule("[green]Server Opened[/green]")
     if debug:
-        # Línea destacada con título
         console.rule("[bold green]🔍 Documentación Scalar activa[/bold green]")
-
-        # Panel con el mensaje y detalles
         mensaje = (
             "[bold cyan]La documentación de tu API está disponible en:[/bold cyan]\n"
             f"  [bold magenta]http://localhost:8000/{id_prefix}/scalar[/bold magenta]\n\n"
@@ -107,16 +103,40 @@ app = FastAPI(
     redirect_slashes=True
 )
 
+# Middleware para cabeceras de seguridad globales
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # Relajo CSP en debug para Scalar docs y assets
+    csp = (
+        "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; object-src 'none'; frame-ancestors 'none'; style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'"
+        if debug
+        else "default-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'"
+    )
+    response.headers["Content-Security-Policy"] = csp
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    return response
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:4200"] if debug else [cors_host],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @main_router.get("/_health_check/")
 async def health_check():
-    # TODO: hacer la comprobacion de la base de datos un una compleja
     result = test_db()
-    return ORJSONResponse({"time": result[0],"status": result[1]})
+    return ORJSONResponse({"time": result[0], "status": result[1]})
 
 class Layout(Enum):
     MODERN = "modern"
     CLASSIC = "classic"
-
 
 class SearchHotKey(Enum):
     A = "a"
@@ -164,14 +184,6 @@ main_router.include_router(auth.router)
 main_router.include_router(cashes.router)
 
 app.include_router(main_router)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], #if debug else [cors_host],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 app.include_router(auth.oauth_router)
 
 class SPAStaticFiles(StaticFiles):
@@ -179,19 +191,15 @@ class SPAStaticFiles(StaticFiles):
         super().__init__(directory=directory, html=html, check_dir=check_dir)
         self.api_prefix = str(api_prefix)
         self.index_file = index_file
-
         self.app = super().__call__
 
-
     async def __call__(self, scope, receive, send):
-
         if scope["type"] == "websocket":
             return await self.app(scope, receive, send)
 
         assert scope["type"] == "http"
 
         request = Request(scope, receive)
-
         path = request.url.path.lstrip("/")
 
         if request.url.path.startswith(self.api_prefix):
@@ -203,7 +211,7 @@ class SPAStaticFiles(StaticFiles):
             await self.app(scope, receive, send)
             return
 
-        index_path = Path(self.directory) /self.index_file
+        index_path = Path(self.directory) / self.index_file
         response = FileResponse(index_path)
         await response(scope, receive, send)
 
@@ -223,22 +231,20 @@ async def oauth_index(request: Request):
     return templates.TemplateResponse(request, name=parser_name(folders=["test", "oauth"], name="login"))
 
 @app.get("/user_panel")
-async def user_panel(request:Request):
+async def user_panel(request: Request):
     return templates.TemplateResponse(request, name=parser_name(folders=["test", "oauth"], name="panel"))
 
 @app.get("/admin")
-async def user_panel(request:Request):
+async def user_panel(request: Request):
     return templates.TemplateResponse(request, name=parser_name(folders=["test", "admin"], name="admin"))
 
 @app.websocket("/{secret}/ws")
 async def websocket_endpoint(websocket: WebSocket, secret: str):
     await websocket.accept()
-    # Enviar mensaje de bienvenida
     await websocket.send_json({"message": "Hello WebSocket"})
     
     try:
         while True:
-            # Recibir y hacer eco del mensaje
             data = await websocket.receive_json()
             await websocket.send_json(data)
     except WebSocketDisconnect:
