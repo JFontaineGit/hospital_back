@@ -433,7 +433,6 @@ async def update_petition_password(session: SessionDep, data: Annotated[UserPeti
 @public_router.post("update/verify/code")
 async def verify_code(session: SessionDep, email: str = Form(...), code: str = Form(...)):
     try:
-        # Usar scalar_one_or_none para obtener un objeto User directo o None
         user = session.scalar(
             select(User).where(User.email == email)
         )
@@ -451,7 +450,6 @@ async def verify_code(session: SessionDep, email: str = Form(...), code: str = F
         return {"message": "Code verified successfully", "success": True}
     
     except HTTPException:
-        # Re-lanzar HTTPExceptions (404, 400) sin modificar
         raise
     except Exception as e:
         console.print_exception(show_locals=True)

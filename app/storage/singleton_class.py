@@ -15,6 +15,7 @@ from pathlib import Path
 from rich.console import Console
 
 import orjson
+import json
 
 #import mmap TODO implementar
 
@@ -107,6 +108,10 @@ class Singleton(metaclass=PurgeMeta):
         return cls._instance
 
     def purge_expired(self, table_name: str) -> None:
+        # Fix: Auto-crea tabla si no existe
+        if table_name not in self.data.tables:
+            console.print(f"[yellow]Table '{table_name}' not found in purge, creating...[/yellow]")
+            self.create_table(table_name)
         items = self._get_internal_all(table_name=table_name)
         if items is None:
             return
@@ -123,17 +128,32 @@ class Singleton(metaclass=PurgeMeta):
         self._dirty = False
         if not STORAGE_PATH.exists():
             STORAGE_PATH.touch()
-            STORAGE_PATH.write_bytes(orjson.dumps({"tables": {}}, default=str))
+            STORAGE_PATH.write_bytes(orjson.dumps({"tables": {}}, default=date_encoder))
         self._load()
 
         t = threading.Thread(target=self._auto_flush, daemon=True)
         t.start()
 
-
     def _load(self):
-        raw = STORAGE_PATH.read_bytes()
-        self.data = Storage.model_validate_json(raw)
+        try:
+            raw = STORAGE_PATH.read_bytes()
+            if not raw:  # Fix: Si vacío, inicializa
+                console.print("[yellow]Storage file empty, initializing...[/yellow]")
+                self.data = Storage(tables={})
+                self._flush()  # Guarda init vacío
+                return
+            self.data = Storage.model_validate_json(raw)
+        except (ValueError, json.JSONDecodeError) as e:  # Catch parse errors (EOF, invalid JSON)
+            console.print(f"[red]Storage corrupt/invalid: {e}. Initializing empty.[/red]")
+            self.data = Storage(tables={})  # Reset to empty
+            self._flush()  # Guarda nuevo
 
+    def _flush(self):
+        """Nuevo método: Flush manual para inicializar o reset"""
+        with self._lock:
+            data_bytes = orjson.dumps(self.data.model_dump(), default=date_encoder)
+            STORAGE_PATH.write_bytes(data_bytes)
+            self._dirty = False
 
     def _auto_flush(self):
         while True:
@@ -166,12 +186,17 @@ class Singleton(metaclass=PurgeMeta):
 
     def _get_internal_all(self, table_name: str):
         self._load()
-        items = self.data.tables.get(table_name, {}).items
+        # Fix: Auto-crea tabla si no existe, y maneja .items correctamente
+        if table_name not in self.data.tables:
+            console.print(f"[yellow]Table '{table_name}' not found in _get_internal_all, creating...[/yellow]")
+            self.create_table(table_name)
+        table = self.data.tables[table_name]
+        items = table.items or {}  # Fix: or {} pa' evitar method, si None
         if not items:
             return None
 
         items_response = []
-        for item in items.values():
+        for item in items.values():  # Ahora items es dict, no method
             #console.print(item)
             items_response.append(
                 GetItem(
@@ -192,7 +217,15 @@ class Singleton(metaclass=PurgeMeta):
     @cached(_cache)
     def get_all(self, table_name: str = None) -> List[GetItem] | None:
         self._load()
-        items = self.data.tables.get(table_name, {}).items
+        if table_name is None:
+            # Si no table_name, get all tables? Asumiendo per table
+            return None
+        # Fix: Similar a _get_internal_all
+        if table_name not in self.data.tables:
+            console.print(f"[yellow]Table '{table_name}' not found in get_all, creating...[/yellow]")
+            self.create_table(table_name)
+        table = self.data.tables[table_name]
+        items = table.items or {}
         if not items:
             return None
 
@@ -217,7 +250,12 @@ class Singleton(metaclass=PurgeMeta):
     @cached(_cache)
     def get(self, key: str, table_name: str) -> GetItem | None:
         self._load()
-        item = self.data.tables[table_name].items.get(key, None)
+        # Fix: Auto-crea
+        if table_name not in self.data.tables:
+            console.print(f"[yellow]Table '{table_name}' not found in get, creating...[/yellow]")
+            self.create_table(table_name)
+        table = self.data.tables[table_name]
+        item = (table.items or {}).get(key, None)
         if not item:
             return None
         return GetItem(
@@ -234,7 +272,13 @@ class Singleton(metaclass=PurgeMeta):
     
     def get_by_parameter(self, parameter: str, equals: Any, table_name: str) -> GetItem:
         self._load()
-        for item in self.data.tables[table_name].items.values():
+        # Fix: Auto-crea
+        if table_name not in self.data.tables:
+            console.print(f"[yellow]Table '{table_name}' not found in get_by_parameter, creating...[/yellow]")
+            self.create_table(table_name)
+        table = self.data.tables[table_name]
+        items_dict = table.items or {}
+        for item in items_dict.values():  # Fix: items_dict pa' evitar method
             #console.print(item)
             data = item.value.get(parameter, None)
             if data:
@@ -275,19 +319,39 @@ class Singleton(metaclass=PurgeMeta):
                 expired=datetime.now() + timedelta(minutes=15)
             )
             
+        # Fix: Auto-crea tabla si no existe
+        if table_name not in self.data.tables:
+            console.print(f"[yellow]Table '{table_name}' not found in set, creating...[/yellow]")
+            self.create_table(table_name)
         self.data.tables[table_name].items[key] = item
         self._mark_dirty()
         return item
 
     def delete(self, key, table_name: str) -> None:
+        # Fix: Auto-crea si no existe (por si delete en empty)
+        if table_name not in self.data.tables:
+            console.print(f"[yellow]Table '{table_name}' not found in delete, creating empty...[/yellow]")
+            self.create_table(table_name)
         del self.data.tables[table_name].items[key]
         self._mark_dirty()
 
     def clear(self, table_name: str = None) -> None:
-        self.data.tables[table_name].clear()
+        if table_name is None:
+            for t in self.data.tables.values():
+                t.items.clear()
+        else:
+            # Fix: Auto-crea si no existe
+            if table_name not in self.data.tables:
+                console.print(f"[yellow]Table '{table_name}' not found in clear, creating empty...[/yellow]")
+                self.create_table(table_name)
+            self.data.tables[table_name].items.clear()
         self._mark_dirty()
 
     def update(self, key, value, table_name, long_live: bool = False) -> None:
+        # Fix: Auto-crea tabla si no existe
+        if table_name not in self.data.tables:
+            console.print(f"[yellow]Table '{table_name}' not found in update, creating...[/yellow]")
+            self.create_table(table_name)
         item = self.get(key, table_name)
         if item is None:
             self.set(key, value, table_name)
