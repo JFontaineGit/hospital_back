@@ -21,6 +21,10 @@ from app.schemas.auth import TokenUserResponse, TokenDoctorsResponse, OauthCodeI
 from app.schemas.medica_area import DoctorAuth, DoctorResponse
 from app.storage import storage
 
+samesite_value = "Lax" if debug else "None"
+secure_debug = True if not debug else False
+
+
 console = Console()
 
 auth = JWTBearer()
@@ -100,8 +104,8 @@ async def doc_login(session: SessionDep, credentials: Annotated[DoctorAuth, Form
         key="access_token",
         value=token,
         httponly=False,
-        secure=not debug, 
-        samesite="None",
+        secure=secure_debug, 
+        samesite=samesite_value,
         max_age=15 * 60,
         path="/"
     )
@@ -109,8 +113,8 @@ async def doc_login(session: SessionDep, credentials: Annotated[DoctorAuth, Form
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=not debug,
-        samesite="None",
+        secure=secure_debug,
+        samesite=samesite_value,
         max_age=24 * 60 * 60,
         path="/"
     )
@@ -118,8 +122,8 @@ async def doc_login(session: SessionDep, credentials: Annotated[DoctorAuth, Form
         key="csrf_token",
         value=csrf_token,
         httponly=False,
-        secure=not debug,
-        samesite="None",
+        secure=secure_debug,
+        samesite=samesite_value,
         max_age=24 * 60 * 60,
         path="/"
     )
@@ -178,8 +182,8 @@ async def login(session: SessionDep, credentials: Annotated[UserAuth, Form(...)]
         key="access_token",
         value=token,
         httponly=False,
-        secure=not debug,
-        samesite="None",
+        secure=secure_debug,
+        samesite=samesite_value,
         max_age=15 * 60,
         path="/"
     )
@@ -187,8 +191,8 @@ async def login(session: SessionDep, credentials: Annotated[UserAuth, Form(...)]
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=not debug,
-        samesite="None",
+        secure=secure_debug,
+        samesite=samesite_value,
         max_age=24 * 60 * 60,
         path="/"
     )
@@ -196,8 +200,8 @@ async def login(session: SessionDep, credentials: Annotated[UserAuth, Form(...)]
         key="csrf_token",
         value=csrf_token,
         httponly=False,
-        secure=not debug,
-        samesite="None",
+        secure=secure_debug,
+        samesite=samesite_value,
         max_age=24 * 60 * 60,
         path="/"
     )
@@ -328,8 +332,8 @@ async def refresh(request: Request, user: User = Depends(auth)) -> ORJSONRespons
         key="access_token",
         value=new_token,
         httponly=False,
-        secure=not debug,
-        samesite="None",
+        secure=True,
+        samesite=samesite_value,
         max_age=15 * 60,
         path="/"
     )
@@ -337,8 +341,8 @@ async def refresh(request: Request, user: User = Depends(auth)) -> ORJSONRespons
         key="refresh_token",
         value=new_refresh_token,
         httponly=True,
-        secure=not debug,
-        samesite="None",
+        secure=True,
+        samesite=samesite_value,
         max_age=24 * 60 * 60,
         path="/"
     )

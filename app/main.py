@@ -109,12 +109,28 @@ async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
-    # Relajo CSP en debug para Scalar docs y assets
-    csp = (
-        "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; object-src 'none'; frame-ancestors 'none'; style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'"
-        if debug
-        else "default-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'"
-    )
+
+    if debug:
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
+            "style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; "
+            "font-src 'self' https://fonts.gstatic.com data:; "
+            "img-src 'self' data: https:; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'"
+        )
+    else:
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self'; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'"
+        )
+
     response.headers["Content-Security-Policy"] = csp
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
@@ -253,4 +269,4 @@ async def websocket_endpoint(websocket: WebSocket, secret: str):
         console.print_exception(show_locals=True)
         console.print(f"Error en WebSocket: {str(e)}")
 
-#app.mount("/", SPAStaticFiles(), name="spa")
+app.mount("/", SPAStaticFiles(), name="spa")
